@@ -13,7 +13,7 @@ class BaseOptions():
 		parser.add_argument('--fix_noise_seed', action='store_true')
 
 		# video
-		parser.add_argument('--input_size', type=int, default=256, help='input image size')
+		parser.add_argument('--input_size', type=int, default=512, help='input image size')
 		parser.add_argument('--input_nc', type=int, default=3, help='input image channel')        
 		parser.add_argument('--fps', type=float, default=25.)
 
@@ -49,10 +49,10 @@ class BaseOptions():
 		parser.add_argument('--num_prev_frames', type=int, default=10)
 		parser.add_argument('--max_grad_norm', default=1, type=float, help='max grad norm for training transformers')
 
-		parser.add_argument('--ode_atol', default=1e-5, type=float)
-		parser.add_argument('--ode_rtol', default=1e-5, type=float)
-		parser.add_argument('--nfe', default=10, type=int,
-							help='Number of Function Evaluateions (NFEs) for ODE solver')
+		parser.add_argument('--ode_atol', default=1e-4, type=float, help='ODE solver absolute tolerance (increased for speed)')
+		parser.add_argument('--ode_rtol', default=1e-4, type=float, help='ODE solver relative tolerance (increased for speed)')
+		parser.add_argument('--nfe', default=7, type=int,
+							help='Number of Function Evaluations (NFEs) for ODE solver (reduced from 10 for speed)')
 		parser.add_argument('--torchdiffeq_ode_method', default='euler',
 							help='ODE solver')
 		parser.add_argument('--a_cfg_scale', default=3, type=float,
