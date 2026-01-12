@@ -204,17 +204,12 @@ class InferenceAgent:
         ta_r = self.ae.adapt(t_r, g_r)
         m_r = self.ae.latent_token_decoder(ta_r)
         
-        # Batch frame rendering for improved latency
+        # Sequential frame decoding (batching doesn't help due to memory dependencies)
         d_hat = []
-        batch_size = 4  # Process 4 frames at a time
-        for t_start in range(0, T, batch_size):
-            t_end = min(t_start + batch_size, T)
-            batch_frames = []
-            for t in range(t_start, t_end):
-                ta_c = self.ae.adapt(t_c[:, t, ...], g_r)
-                m_c = self.ae.latent_token_decoder(ta_c)
-                batch_frames.append(self.ae.decode(m_c, m_r, f_r))
-            d_hat.extend(batch_frames)
+        for t in range(T):
+            ta_c = self.ae.adapt(t_c[:, t, ...], g_r)
+            m_c = self.ae.latent_token_decoder(ta_c)
+            d_hat.append(self.ae.decode(m_c, m_r, f_r))
             
         return {'d_hat': torch.stack(d_hat, dim=1).squeeze()}
 

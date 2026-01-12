@@ -334,21 +334,16 @@ class InferenceAgent:
         torch.manual_seed(seed)
         sample = self.generator.sample(data, a_cfg_scale=cfg_scale, nfe=nfe, seed=seed)
         
-        # Batch frame rendering for improved latency
+        # Sequential frame decoding
         T = sample.shape[1]
         ta_r = self.renderer.adapt(t_lat, g_r)
         m_r = self.renderer.latent_token_decoder(ta_r)
         
         d_hat = []
-        batch_size = 4  # Process 4 frames at a time
-        for t_start in range(0, T, batch_size):
-            t_end = min(t_start + batch_size, T)
-            batch_frames = []
-            for t in range(t_start, t_end):
-                ta_c = self.renderer.adapt(sample[:, t, ...], g_r)
-                m_c = self.renderer.latent_token_decoder(ta_c)
-                batch_frames.append(self.renderer.decode(m_c, m_r, f_r))
-            d_hat.extend(batch_frames)
+        for t in range(T):
+            ta_c = self.renderer.adapt(sample[:, t, ...], g_r)
+            m_c = self.renderer.latent_token_decoder(ta_c)
+            d_hat.append(self.renderer.decode(m_c, m_r, f_r))
         
         vid_tensor = torch.stack(d_hat, dim=1).squeeze(0)
         return self.save_video(vid_tensor, self.opt.fps, aud_path)

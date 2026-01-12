@@ -183,7 +183,7 @@ class InferenceAgent:
         s_tensor = self.process_image(img_path, crop)
         a_tensor = self.process_audio(aud_path)
         
-        # Encode source image
+        # Encode source image (done once, reused for all frames)
         f_r, g_r = self.renderer.dense_feature_encoder(s_tensor)
         t_lat = self.renderer.latent_token_encoder(s_tensor)
         if isinstance(t_lat, tuple):
@@ -202,21 +202,22 @@ class InferenceAgent:
         # Generate motion latents
         sample = self.generator.sample(data, a_cfg_scale=cfg_scale, nfe=nfe, seed=self.opt.seed)
         
-        # Decode to frames (batched for speed)
+        # Decode to frames - simple loop (batching doesn't help here due to memory constraints)
         T = sample.shape[1]
         ta_r = self.renderer.adapt(t_lat, g_r)
         m_r = self.renderer.latent_token_decoder(ta_r)
         
         d_hat = []
-        batch_size = 4
-        for t_start in range(0, T, batch_size):
-            t_end = min(t_start + batch_size, T)
-            for t in range(t_start, t_end):
-                ta_c = self.renderer.adapt(sample[:, t, ...], g_r)
-                m_c = self.renderer.latent_token_decoder(ta_c)
-                d_hat.append(self.renderer.decode(m_c, m_r, f_r))
+        for t in range(T):
+            ta_c = self.renderer.adapt(sample[:, t, ...], g_r)
+            m_c = self.renderer.latent_token_decoder(ta_c)
+            d_hat.append(self.renderer.decode(m_c, m_r, f_r))
         
         vid_tensor = torch.stack(d_hat, dim=1).squeeze()
+        
+        # Ensure CUDA operations complete before video save
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         
         # Save video
         return self._save_video(vid_tensor, output_path, aud_path)
