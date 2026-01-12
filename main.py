@@ -1,9 +1,11 @@
 import os
 import tempfile
 import subprocess
+from typing import Optional
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+import httpx
 import torch
 import numpy as np
 import cv2
@@ -247,29 +249,69 @@ agent = InferenceAgent(config)
 
 @app.post("/generate")
 async def generate_video(
-    audio: UploadFile = File(...),
+    audio: Optional[UploadFile] = File(None),
+    text: Optional[str] = Form(None),
     user_id: str = Form(...),
     crop: bool = Form(True),
     cfg_scale: float = Form(3.0),
-    nfe: int = Form(7)
+    nfe: int = Form(7),
+    # TTS options (used when text is provided)
+    reference_aud_url: Optional[str] = Form(None),
+    clone: Optional[str] = Form(None),
+    split_sentences: bool = Form(False),
+    speed: float = Form(1.0)
 ):
-    """Generate talking face video from audio using default avatar.
+    """Generate talking face video from audio or text using default avatar.
+    
+    Provide either 'audio' (uploaded file) or 'text' (for TTS synthesis).
+    When 'text' is provided, the TTS service at tts:8000/generate is called.
     
     This endpoint uses a persistent model - no subprocess overhead.
     """
+    
+    if not audio and not text:
+        raise HTTPException(status_code=400, detail="Either 'audio' or 'text' must be provided")
     
     img_path = "/app/img/avatar.jpg"
     output_dir = f"/app/results/{user_id}/"
     os.makedirs(output_dir, exist_ok=True)
     
-    # Save uploaded audio
     aud_path = f"/app/aud/{user_id}_audio.wav"
     os.makedirs(os.path.dirname(aud_path), exist_ok=True)
-    with open(aud_path, "wb") as f:
-        content = await audio.read()
-        f.write(content)
     
     try:
+        if text:
+            # Use TTS service to synthesize audio from text
+            tts_payload = {
+                "text": text,
+                "source_aud": reference_aud_url or "",
+                "split_sentences": split_sentences,
+                "streaming": False,
+                "speed": speed
+            }
+            if clone:
+                tts_payload["clone"] = clone
+            
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                tts_response = await client.post(
+                    "http://tts:8000/generate",
+                    json=tts_payload
+                )
+                if tts_response.status_code != 200:
+                    raise HTTPException(
+                        status_code=502, 
+                        detail=f"TTS service error: {tts_response.text}"
+                    )
+                # Save the synthesized audio
+                with open(aud_path, "wb") as f:
+                    f.write(tts_response.content)
+        else:
+            # Use uploaded audio file
+            with open(aud_path, "wb") as f:
+                content = await audio.read()
+                f.write(content)
+        print("Audio saved to", aud_path)
+        
         output_path = os.path.join(output_dir, f"{user_id}.mp4")
         
         # Direct inference - no subprocess!
@@ -292,6 +334,10 @@ async def generate_video(
             filename=f"generated_{user_id}.mp4"
         )
         
+    except httpx.RequestError as e:
+        if os.path.exists(aud_path):
+            os.unlink(aud_path)
+        raise HTTPException(status_code=502, detail=f"Failed to connect to TTS service: {str(e)}")
     except Exception as e:
         if os.path.exists(aud_path):
             os.unlink(aud_path)
