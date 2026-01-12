@@ -16,13 +16,19 @@ from renderer.models import IMTRenderer
 # Optimize CUDA backends
 torch.backends.cudnn.enabled = True
 torch.backends.cudnn.benchmark = True
+if hasattr(torch.backends.cuda, 'enable_flash_sdp'):
+    torch.backends.cuda.enable_flash_sdp(True)
+if hasattr(torch.backends.cuda, 'enable_mem_efficient_sdp'):
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
 
 
 class DataProcessor:
     def __init__(self, opt):
         self.opt = opt
         self.input_size = opt.input_size
-        self.fa = face_alignment.FaceAlignment(face_alignment.LandmarksType.TWO_D, flip_input=False)
+        # Use GPU for face alignment if available
+        fa_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.fa = face_alignment.FaceAlignment(face_alignment.LandmarksType.TWO_D, device=fa_device, flip_input=False)
         
         self.transform = transforms.Compose([
             transforms.Resize((512, 512)), 

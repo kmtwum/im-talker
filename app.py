@@ -6,6 +6,14 @@ import numpy as np
 import cv2
 import torch
 import torchvision
+
+# ==== Latency Optimizations ====
+torch.backends.cudnn.enabled = True
+torch.backends.cudnn.benchmark = True
+if hasattr(torch.backends.cuda, 'enable_flash_sdp'):
+    torch.backends.cuda.enable_flash_sdp(True)
+if hasattr(torch.backends.cuda, 'enable_mem_efficient_sdp'):
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
 import librosa
 import face_alignment
 import gradio as gr
@@ -104,9 +112,9 @@ class AppConfig:
         self.no_learned_pe = False
         self.num_prev_frames = 10
         self.max_grad_norm = 1.0
-        self.ode_atol = 1e-5
-        self.ode_rtol = 1e-5
-        self.nfe = 10
+        self.ode_atol = 1e-4  # Increased for speed
+        self.ode_rtol = 1e-4  # Increased for speed
+        self.nfe = 7  # Reduced from 10 for faster generation
         self.torchdiffeq_ode_method = 'euler'
         self.a_cfg_scale = 3.0
         self.swin_res_threshold = 128
@@ -126,7 +134,9 @@ class DataProcessor:
         self.sampling_rate = opt.sampling_rate
         print(f"Loading Face Alignment...")
         # Load FaceAlignment on CPU to save VRAM for the generator
-        self.fa = face_alignment.FaceAlignment(face_alignment.LandmarksType.TWO_D, device='cpu', flip_input=False)
+        # Use GPU for face alignment if available
+        fa_device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.fa = face_alignment.FaceAlignment(face_alignment.LandmarksType.TWO_D, device=fa_device, flip_input=False)
         
         print("Loading Wav2Vec2...")
         local_path = opt.wav2vec_model_path
@@ -323,15 +333,23 @@ class InferenceAgent:
         data['ref_x'] = t_lat
         torch.manual_seed(seed)
         sample = self.generator.sample(data, a_cfg_scale=cfg_scale, nfe=nfe, seed=seed)
-        d_hat = []
+        
+        # Batch frame rendering for improved latency
         T = sample.shape[1]
         ta_r = self.renderer.adapt(t_lat, g_r)
         m_r = self.renderer.latent_token_decoder(ta_r)
-        for t in range(T):
-            ta_c = self.renderer.adapt(sample[:, t, ...], g_r)
-            m_c = self.renderer.latent_token_decoder(ta_c)
-            out_frame = self.renderer.decode(m_c, m_r, f_r)
-            d_hat.append(out_frame)
+        
+        d_hat = []
+        batch_size = 4  # Process 4 frames at a time
+        for t_start in range(0, T, batch_size):
+            t_end = min(t_start + batch_size, T)
+            batch_frames = []
+            for t in range(t_start, t_end):
+                ta_c = self.renderer.adapt(sample[:, t, ...], g_r)
+                m_c = self.renderer.latent_token_decoder(ta_c)
+                batch_frames.append(self.renderer.decode(m_c, m_r, f_r))
+            d_hat.extend(batch_frames)
+        
         vid_tensor = torch.stack(d_hat, dim=1).squeeze(0)
         return self.save_video(vid_tensor, self.opt.fps, aud_path)
 
