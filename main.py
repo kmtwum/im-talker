@@ -237,7 +237,8 @@ class InferenceAgent:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
         else:
-            os.rename(temp_path, output_path)
+            import shutil
+            shutil.move(temp_path, output_path)
         
         return output_path
 
