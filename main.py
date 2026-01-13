@@ -273,7 +273,7 @@ async def generate_video(
     if not audio and not text:
         raise HTTPException(status_code=400, detail="Either 'audio' or 'text' must be provided")
     
-    img_path = "/app/img/avatar.jpg"
+    img_path = "/app/img/avatar_chest.jpg"
     output_dir = f"/app/results/{user_id}/"
     os.makedirs(output_dir, exist_ok=True)
     
@@ -311,6 +311,7 @@ async def generate_video(
             with open(aud_path, "wb") as f:
                 content = await audio.read()
                 f.write(content)
+            
         print("Audio saved to", aud_path)
         
         output_path = os.path.join(output_dir, f"{user_id}.mp4")
