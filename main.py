@@ -117,16 +117,16 @@ class InferenceAgent:
             transforms.ToTensor(),
         ])
         
-        print("Inference agent ready!")
+        print(f"Inference agent ready! {opt.device}")
     
     def _load_renderer(self, path):
-        checkpoint = torch.load(path, map_location="cpu")
+        checkpoint = torch.load(path, map_location=self.device)
         state_dict = checkpoint.get("state_dict", checkpoint)
         clean_dict = {k.replace("gen.", ""): v for k, v in state_dict.items() if k.startswith("gen.")}
         self.renderer.load_state_dict(clean_dict, strict=False)
     
     def _load_generator(self, path):
-        checkpoint = torch.load(path, map_location='cpu')
+        checkpoint = torch.load(path, map_location=self.device)
         state_dict = checkpoint.get('state_dict', checkpoint)
         if 'model' in state_dict:
             state_dict = state_dict['model']
@@ -135,7 +135,7 @@ class InferenceAgent:
         with torch.no_grad():
             for name, param in self.generator.named_parameters():
                 if name in clean_dict:
-                    param.copy_(clean_dict[name].to(self.device))
+                    param.copy_(clean_dict[name])  # Already on correct device
     
     def process_image(self, img_path: str, crop: bool = True) -> torch.Tensor:
         """Load and preprocess source image"""
@@ -165,19 +165,23 @@ class InferenceAgent:
                 crop_img = img_arr[y1_new:y2_new, x1_new:x2_new]
                 img_pil = Image.fromarray(crop_img)
         
-        return self.transform(img_pil).unsqueeze(0).to(self.device)
+        return self.transform(img_pil).unsqueeze(0).to(self.device, non_blocking=True)
     
     def process_audio(self, aud_path: str) -> torch.Tensor:
         """Load and preprocess audio"""
         speech_array, sr = librosa.load(aud_path, sr=self.opt.sampling_rate)
         return self.wav2vec_preprocessor(
             speech_array, sampling_rate=sr, return_tensors='pt'
-        ).input_values[0].unsqueeze(0).to(self.device)
+        ).input_values[0].unsqueeze(0).to(self.device, non_blocking=True)
     
     @torch.no_grad()
     def generate(self, img_path: str, aud_path: str, output_path: str, 
-                 crop: bool = True, cfg_scale: float = 3.0, nfe: int = 7) -> str:
-        """Run inference and return video path"""
+                 crop: bool = True, cfg_scale: float = 3.0, nfe: int = 7, output_size: int = 512) -> str:
+        """Run inference and return video path
+        
+        Args:
+            output_size: Output video size (width=height, 1:1 ratio). Default 512.
+        """
         
         # Preprocess inputs
         s_tensor = self.process_image(img_path, crop)
@@ -219,11 +223,15 @@ class InferenceAgent:
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         
-        # Save video
-        return self._save_video(vid_tensor, output_path, aud_path)
+        # Save video (resize on GPU if needed)
+        return self._save_video(vid_tensor, output_path, aud_path, output_size)
     
-    def _save_video(self, vid_tensor, output_path, audio_path):
-        """Save video with audio"""
+    def _save_video(self, vid_tensor, output_path, audio_path, output_size: int = 512):
+        """Save video with audio, resizing on GPU if needed.
+        
+        Args:
+            output_size: Target size for output video (1:1 ratio)
+        """
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp:
             temp_path = tmp.name
         
@@ -257,7 +265,7 @@ async def generate_video(
     crop: bool = Form(True),
     cfg_scale: float = Form(3.0),
     nfe: int = Form(7),
-    # TTS options (used when text is provided)
+    size: int = Form(512, ge=64, le=512, description="Output video size in pixels (1:1 ratio)"),
     reference_aud_url: Optional[str] = Form(None),
     clone: Optional[str] = Form(None),
     split_sentences: bool = Form(False),
