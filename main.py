@@ -332,7 +332,8 @@ async def generate_video(
             output_path=output_path,
             crop=crop,
             cfg_scale=cfg_scale,
-            nfe=nfe
+            nfe=nfe,
+            output_size=size
         )
         
         # Clean up temp audio
