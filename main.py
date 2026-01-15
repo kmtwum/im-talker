@@ -1,12 +1,14 @@
 import os
 import tempfile
 import subprocess
-from typing import Optional
+import glob
+from typing import Optional, List, AsyncGenerator
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import torch
+from torch.amp import autocast
 import numpy as np
 import cv2
 import librosa
@@ -251,6 +253,130 @@ class InferenceAgent:
             shutil.move(temp_path, output_path)
         
         return output_path
+    
+    @torch.no_grad()
+    def generate_chunk(self, img_tensor: torch.Tensor, aud_path: str, 
+                       f_r: torch.Tensor, g_r: torch.Tensor, t_lat: torch.Tensor,
+                       cfg_scale: float = 3.0, nfe: int = 7) -> bytes:
+        """Generate video for a single audio chunk and return MP4 bytes.
+        
+        Args:
+            img_tensor: Pre-processed source image tensor
+            aud_path: Path to the audio chunk
+            f_r, g_r, t_lat: Pre-computed renderer encodings (reused across chunks)
+            cfg_scale: CFG scale for generation
+            nfe: Number of function evaluations
+            
+        Returns:
+            MP4 video bytes with muxed audio
+        """
+        # Process audio chunk
+        a_tensor = self.process_audio(aud_path)
+        
+        # Prepare data for generator
+        data = {
+            's': img_tensor,
+            'a': a_tensor,
+            'pose': None,
+            'cam': None,
+            'gaze': None,
+            'ref_x': t_lat
+        }
+        
+        # Generate motion latents for this chunk
+        sample = self.generator.sample(data, a_cfg_scale=cfg_scale, nfe=nfe, seed=self.opt.seed)
+        
+        # Decode to frames
+        T = sample.shape[1]
+        ta_r = self.renderer.adapt(t_lat, g_r)
+        m_r = self.renderer.latent_token_decoder(ta_r)
+        
+        d_hat = []
+        with autocast(dtype=torch.bfloat16):
+            for t in range(T):
+                ta_c = self.renderer.adapt(sample[:, t, ...], g_r)
+                m_c = self.renderer.latent_token_decoder(ta_c)
+                d_hat.append(self.renderer.decode(m_c, m_r, f_r))
+        
+        vid_tensor = torch.stack(d_hat, dim=1).squeeze()
+        
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        
+        # Convert to video bytes
+        return self._encode_to_mp4_bytes(vid_tensor, aud_path)
+    
+    def _encode_to_mp4_bytes(self, vid_tensor: torch.Tensor, audio_path: str) -> bytes:
+        """Encode video tensor to MP4 bytes with audio.
+        
+        Returns:
+            MP4 video bytes
+        """
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp_vid:
+            temp_vid_path = tmp_vid.name
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp_out:
+            temp_out_path = tmp_out.name
+        
+        try:
+            # Write video frames
+            vid = vid_tensor.permute(0, 2, 3, 1).detach().clamp(-1, 1).cpu()
+            vid = (vid * 255).type(torch.ByteTensor)
+            torchvision.io.write_video(temp_vid_path, vid, fps=self.opt.fps)
+            
+            # Mux with audio
+            cmd = f'ffmpeg -i {temp_vid_path} -i {audio_path} -c:v copy -c:a aac {temp_out_path} -y -loglevel error'
+            subprocess.call(cmd, shell=True)
+            
+            # Read final MP4 bytes
+            with open(temp_out_path, 'rb') as f:
+                return f.read()
+        finally:
+            # Cleanup temp files
+            if os.path.exists(temp_vid_path):
+                os.remove(temp_vid_path)
+            if os.path.exists(temp_out_path):
+                os.remove(temp_out_path)
+
+
+def split_audio_into_chunks(audio_path: str, chunk_duration: float, output_dir: str) -> List[str]:
+    """Split audio file into chunks of specified duration using ffmpeg.
+    
+    Args:
+        audio_path: Path to the source audio file
+        chunk_duration: Duration of each chunk in seconds
+        output_dir: Directory to save audio chunks
+        
+    Returns:
+        List of paths to the audio chunks
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    chunk_pattern = os.path.join(output_dir, "chunk_%03d.wav")
+    
+    cmd = [
+        'ffmpeg', '-i', audio_path,
+        '-f', 'segment',
+        '-segment_time', str(chunk_duration),
+        '-c', 'copy',
+        chunk_pattern,
+        '-y', '-loglevel', 'error'
+    ]
+    subprocess.call(cmd)
+    
+    # Get list of generated chunks in order
+    chunks = sorted(glob.glob(os.path.join(output_dir, "chunk_*.wav")))
+    return chunks
+
+
+def cleanup_chunks(chunk_paths: List[str], chunk_dir: str):
+    """Clean up temporary audio chunks."""
+    for path in chunk_paths:
+        if os.path.exists(path):
+            os.remove(path)
+    if os.path.exists(chunk_dir):
+        try:
+            os.rmdir(chunk_dir)
+        except OSError:
+            pass  # Directory not empty, leave it
 
 
 # Initialize agent once at startup (models loaded here)
@@ -361,3 +487,133 @@ async def generate_video(
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "models_loaded": agent is not None}
+
+
+@app.post("/generate/stream")
+async def generate_video_stream(
+    audio: Optional[UploadFile] = File(None),
+    text: Optional[str] = Form(None),
+    user_id: str = Form(...),
+    crop: bool = Form(True),
+    cfg_scale: float = Form(3.0),
+    nfe: int = Form(7),
+    chunk_duration: float = Form(5.0, ge=2.0, le=15.0, description="Duration of each video chunk in seconds"),
+    reference_aud_url: Optional[str] = Form(None),
+    clone: Optional[str] = Form(None),
+    split_sentences: bool = Form(False),
+    speed: float = Form(1.0)
+):
+    """Stream video chunks as they're generated.
+    
+    Each chunk is a complete MP4 segment with synchronized audio.
+    Chunks are yielded progressively as they complete, allowing the client
+    to start playback before the full video is ready.
+    
+    Provide either 'audio' (uploaded file) or 'text' (for TTS synthesis).
+    
+    The response is a multipart stream where each part is a complete MP4 chunk.
+    Chunks are separated by a boundary marker for easy parsing.
+    """
+    
+    if not audio and not text:
+        raise HTTPException(status_code=400, detail="Either 'audio' or 'text' must be provided")
+    
+    img_path = "/app/img/avatar_chest.jpg"
+    aud_path = f"/app/aud/{user_id}_stream_audio.wav"
+    chunk_dir = f"/app/aud/{user_id}_chunks/"
+    os.makedirs(os.path.dirname(aud_path), exist_ok=True)
+    
+    # Get full audio first (from upload or TTS)
+    try:
+        if text:
+            tts_payload = {
+                "text": text,
+                "source_aud": reference_aud_url or "",
+                "split_sentences": split_sentences,
+                "streaming": False,
+                "speed": speed
+            }
+            if clone:
+                tts_payload["clone"] = clone
+            
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                tts_response = await client.post(
+                    "http://tts:8000/generate",
+                    json=tts_payload
+                )
+                if tts_response.status_code != 200:
+                    raise HTTPException(
+                        status_code=502, 
+                        detail=f"TTS service error: {tts_response.text}"
+                    )
+                with open(aud_path, "wb") as f:
+                    f.write(tts_response.content)
+        else:
+            with open(aud_path, "wb") as f:
+                content = await audio.read()
+                f.write(content)
+    except httpx.RequestError as e:
+        if os.path.exists(aud_path):
+            os.unlink(aud_path)
+        raise HTTPException(status_code=502, detail=f"Failed to connect to TTS service: {str(e)}")
+    
+    async def chunk_generator() -> AsyncGenerator[bytes, None]:
+        """Generate and yield video chunks."""
+        chunk_paths = []
+        try:
+            # Pre-process image once (expensive - reuse for all chunks)
+            s_tensor = agent.process_image(img_path, crop)
+            
+            # Pre-compute renderer encodings (reused for all chunks)
+            with torch.no_grad():
+                f_r, g_r = agent.renderer.dense_feature_encoder(s_tensor)
+                t_lat = agent.renderer.latent_token_encoder(s_tensor)
+                if isinstance(t_lat, tuple):
+                    t_lat = t_lat[0]
+            
+            # Split audio into chunks
+            chunk_paths = split_audio_into_chunks(aud_path, chunk_duration, chunk_dir)
+            
+            if not chunk_paths:
+                raise ValueError("No audio chunks generated")
+            
+            # Define boundary for multipart response
+            boundary = b"--CHUNK_BOUNDARY--"
+            
+            # Generate video for each audio chunk
+            for i, chunk_path in enumerate(chunk_paths):
+                print(f"Processing chunk {i+1}/{len(chunk_paths)}: {chunk_path}")
+                
+                # Generate video bytes for this chunk
+                video_bytes = agent.generate_chunk(
+                    img_tensor=s_tensor,
+                    aud_path=chunk_path,
+                    f_r=f_r,
+                    g_r=g_r,
+                    t_lat=t_lat,
+                    cfg_scale=cfg_scale,
+                    nfe=nfe
+                )
+                
+                # Yield chunk with boundary marker and metadata
+                chunk_header = f"chunk_index:{i}\nchunk_count:{len(chunk_paths)}\ncontent_length:{len(video_bytes)}\n".encode()
+                yield boundary + b"\n" + chunk_header + b"\n" + video_bytes + b"\n"
+                
+        except Exception as e:
+            print(f"Streaming error: {e}")
+            raise
+        finally:
+            # Cleanup
+            cleanup_chunks(chunk_paths, chunk_dir)
+            if os.path.exists(aud_path):
+                os.unlink(aud_path)
+    
+    return StreamingResponse(
+        chunk_generator(),
+        media_type="application/octet-stream",
+        headers={
+            "X-Chunk-Duration": str(chunk_duration),
+            "X-Content-Type": "video/mp4",
+            "X-Chunk-Boundary": "--CHUNK_BOUNDARY--"
+        }
+    )
