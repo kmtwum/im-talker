@@ -46,7 +46,7 @@ class BaseOptions():
 		parser.add_argument('--num_heads', default=8, type=int)
 		parser.add_argument('--mlp_ratio', default=4.0, type=float)
 		parser.add_argument('--no_learned_pe', action='store_true')
-		parser.add_argument('--num_prev_frames', type=int, default=10)
+		parser.add_argument('--num_prev_frames', type=int, default=5, help='Temporal context frames (reduced from 10 for speed)')
 		parser.add_argument('--max_grad_norm', default=1, type=float, help='max grad norm for training transformers')
 
 		parser.add_argument('--ode_atol', default=1e-4, type=float, help='ODE solver absolute tolerance (increased for speed)')
@@ -55,8 +55,8 @@ class BaseOptions():
 							help='Number of Function Evaluations (NFEs) for ODE solver (reduced from 10 for speed)')
 		parser.add_argument('--torchdiffeq_ode_method', default='euler',
 							help='ODE solver')
-		parser.add_argument('--a_cfg_scale', default=3, type=float,
-							help='audio classifier-free guidance (vector field) scale')             
+		parser.add_argument('--a_cfg_scale', default=1.5, type=float,
+							help='Audio CFG scale. 1.0=fastest (no CFG), >1.0 doubles ODE computation')             
 		parser.add_argument('--swin_res_threshold', type=int, default=128, help='Resolution threshold to switch to Swin Attention.')
 		parser.add_argument('--window_size', type=int, default=8, help='Window size for Swin Attention.')
 

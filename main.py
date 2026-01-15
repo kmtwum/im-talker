@@ -66,13 +66,14 @@ class InferenceConfig:
         self.num_heads = 8
         self.mlp_ratio = 4.0
         self.no_learned_pe = False
-        self.num_prev_frames = 10
+        self.num_prev_frames = 5  # Reduced from 10 for faster processing
         # Optimized defaults
         self.ode_atol = 1e-4
         self.ode_rtol = 1e-4
         self.nfe = 7
         self.torchdiffeq_ode_method = 'euler'
-        self.a_cfg_scale = 3.0
+        # CFG scale: 1.0 = no CFG (fastest), >1.0 = 2x ODE computation per step
+        self.a_cfg_scale = 1.5  # Reduced from 3.0 - higher values double computation
         self.swin_res_threshold = 128
         self.window_size = 8
         # Paths
@@ -212,10 +213,11 @@ class InferenceAgent:
         m_r = self.renderer.latent_token_decoder(ta_r)
         
         d_hat = []
-        for t in range(T):
-            ta_c = self.renderer.adapt(sample[:, t, ...], g_r)
-            m_c = self.renderer.latent_token_decoder(ta_c)
-            d_hat.append(self.renderer.decode(m_c, m_r, f_r))
+        with autocast(dtype=torch.bfloat16):
+            for t in range(T):
+                ta_c = self.renderer.adapt(sample[:, t, ...], g_r)
+                m_c = self.renderer.latent_token_decoder(ta_c)
+                d_hat.append(self.renderer.decode(m_c, m_r, f_r))
         
         vid_tensor = torch.stack(d_hat, dim=1).squeeze()
         
