@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 import torch
+from torch.amp import autocast
 import numpy as np
 import cv2
 import librosa
@@ -213,7 +214,7 @@ class InferenceAgent:
         m_r = self.renderer.latent_token_decoder(ta_r)
         
         d_hat = []
-        with autocast(dtype=torch.bfloat16):
+        with autocast(device_type='cuda', dtype=torch.bfloat16):
             for t in range(T):
                 ta_c = self.renderer.adapt(sample[:, t, ...], g_r)
                 m_c = self.renderer.latent_token_decoder(ta_c)
