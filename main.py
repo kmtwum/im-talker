@@ -1,7 +1,7 @@
 import os
 import tempfile
 import subprocess
-from typing import Optional
+from typing import Optional, Literal
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -92,7 +92,7 @@ async def synthesize_elevenlabs(text: str, output_path: str, voice_id: Optional[
         mp3_path = output_path.replace(".wav", ".mp3")
         with open(mp3_path, "wb") as f:
             f.write(response.content)
-        print(f"[TTS] Converting MP3 to WAV...")
+        print("[TTS] Converting MP3 to WAV...")
         # Convert MP3 to WAV using ffmpeg
         cmd = f"ffmpeg -i {mp3_path} -ar 16000 -ac 1 {output_path} -y -loglevel error"
         subprocess.call(cmd, shell=True)
@@ -131,8 +131,8 @@ class InferenceConfig:
         self.no_learned_pe = False
         self.num_prev_frames = 5  # Reduced from 10 for faster processing
         # Optimized defaults
-        self.ode_atol = 1e-4
-        self.ode_rtol = 1e-4
+        self.ode_atol = 1e-5
+        self.ode_rtol = 1e-5
         self.nfe = 7
         self.torchdiffeq_ode_method = 'euler'
         # CFG scale: 1.0 = no CFG (fastest), >1.0 = 2x ODE computation per step
@@ -203,11 +203,14 @@ class InferenceAgent:
     
     def process_image(self, img_path: str, crop: bool = True) -> torch.Tensor:
         """Load and preprocess source image"""
+        print(f"[Image] Loading image from {img_path}...")
         img = cv2.imread(img_path)
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         img_pil = Image.fromarray(img)
+        print(f"[Image] Original size: {img.shape[1]}x{img.shape[0]}")
         
         if crop:
+            print("[Image] Detecting face for cropping...")
             img_arr = np.array(img_pil)
             bboxes = self.fa.face_detector.detect_from_image(img_arr)
             valid_bboxes = [
@@ -228,34 +231,44 @@ class InferenceAgent:
                 y2_new = y1_new + side
                 crop_img = img_arr[y1_new:y2_new, x1_new:x2_new]
                 img_pil = Image.fromarray(crop_img)
+                print(f"[Image] Cropped to {side}x{side}")
+            else:
+                print("[Image] No face detected, using full image")
         
+        print("[Image] Transforming and moving to device...")
         return self.transform(img_pil).unsqueeze(0).to(self.device, non_blocking=True)
     
     def process_audio(self, aud_path: str) -> torch.Tensor:
         """Load and preprocess audio"""
+        print(f"[Audio] Loading audio from {aud_path}...")
         speech_array, sr = librosa.load(aud_path, sr=self.opt.sampling_rate)
-        return self.wav2vec_preprocessor(
+        duration = len(speech_array) / sr
+        print(f"[Audio] Duration: {duration:.2f}s, Sample rate: {sr}Hz")
+        print("[Audio] Processing with Wav2Vec2...")
+        result = self.wav2vec_preprocessor(
             speech_array, sampling_rate=sr, return_tensors='pt'
         ).input_values[0].unsqueeze(0).to(self.device, non_blocking=True)
+        print("[Audio] Audio preprocessed and moved to device")
+        return result
     
     @torch.no_grad()
     def generate(self, img_path: str, aud_path: str, output_path: str, 
-                 crop: bool = True, cfg_scale: float = 3.0, nfe: int = 7, output_size: int = 512) -> str:
-        """Run inference and return video path
-        
-        Args:
-            output_size: Output video size (width=height, 1:1 ratio). Default 512.
-        """
+                 crop: bool = True, cfg_scale: float = 3.0, nfe: int = 7) -> str:
+        print(f"\n[Generate] Starting generation (cfg_scale={cfg_scale}, nfe={nfe})")
         
         # Preprocess inputs
+        print("[Generate] Step 1/6: Processing image...")
         s_tensor = self.process_image(img_path, crop)
+        print("[Generate] Step 2/6: Processing audio...")
         a_tensor = self.process_audio(aud_path)
         
         # Encode source image (done once, reused for all frames)
+        print("[Generate] Step 3/6: Encoding source image...")
         f_r, g_r = self.renderer.dense_feature_encoder(s_tensor)
         t_lat = self.renderer.latent_token_encoder(s_tensor)
         if isinstance(t_lat, tuple):
             t_lat = t_lat[0]
+        print("[Generate] Source image encoded")
         
         # Prepare data for generator
         data = {
@@ -268,10 +281,13 @@ class InferenceAgent:
         }
         
         # Generate motion latents
+        print("[Generate] Step 4/6: Generating motion latents...")
         sample = self.generator.sample(data, a_cfg_scale=cfg_scale, nfe=nfe, seed=self.opt.seed)
+        print(f"[Generate] Generated {sample.shape[1]} motion frames")
         
         # Decode to frames - simple loop (batching doesn't help here due to memory constraints)
         T = sample.shape[1]
+        print(f"[Generate] Step 5/6: Rendering {T} frames...")
         ta_r = self.renderer.adapt(t_lat, g_r)
         m_r = self.renderer.latent_token_decoder(ta_r)
         
@@ -281,30 +297,37 @@ class InferenceAgent:
                 ta_c = self.renderer.adapt(sample[:, t, ...], g_r)
                 m_c = self.renderer.latent_token_decoder(ta_c)
                 d_hat.append(self.renderer.decode(m_c, m_r, f_r))
+                if (t + 1) % 25 == 0 or t == T - 1:
+                    print(f"[Generate] Rendered frame {t + 1}/{T}")
         
         vid_tensor = torch.stack(d_hat, dim=1).squeeze()
+        print(f"[Generate] All frames rendered, tensor shape: {vid_tensor.shape}")
         
         # Ensure CUDA operations complete before video save
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         
         # Save video (resize on GPU if needed)
-        return self._save_video(vid_tensor, output_path, aud_path, output_size)
+        print("[Generate] Step 6/6: Saving video...")
+        return self._save_video(vid_tensor, output_path, aud_path)
     
-    def _save_video(self, vid_tensor, output_path, audio_path, output_size: int = 512):
+    def _save_video(self, vid_tensor, output_path, audio_path):
         """Save video with audio, resizing on GPU if needed.
         
         Args:
             output_size: Target size for output video (1:1 ratio)
         """
+        print("[Save] Preparing video tensor...")
         with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp:
             temp_path = tmp.name
         
         vid = vid_tensor.permute(0, 2, 3, 1).detach().clamp(-1, 1).cpu()
         vid = (vid * 255).type(torch.ByteTensor)
+        print(f"[Save] Writing {vid.shape[0]} frames to temp file...")
         torchvision.io.write_video(temp_path, vid, fps=self.opt.fps)
         
         if audio_path:
+            print("[Save] Muxing audio with video...")
             cmd = f'ffmpeg -i {temp_path} -i {audio_path} -c:v copy -c:a aac {output_path} -y -loglevel error'
             subprocess.call(cmd, shell=True)
             if os.path.exists(temp_path):
@@ -313,6 +336,7 @@ class InferenceAgent:
             import shutil
             shutil.move(temp_path, output_path)
         
+        print(f"[Save] Video saved to {output_path}")
         return output_path
 
 
@@ -330,7 +354,6 @@ async def generate_video(
     crop: bool = Form(True),
     cfg_scale: float = Form(3.0),
     nfe: int = Form(7),
-    size: int = Form(512, ge=64, le=512, description="Output video size in pixels (1:1 ratio)"),
     tts_preference: Optional[Literal["elevenlabs", "coqui"]] = Form(None, description="TTS provider: 'elevenlabs' or 'coqui'"),
     reference_aud_url: Optional[str] = Form(None),
     clone: Optional[str] = Form(None),
@@ -357,38 +380,52 @@ async def generate_video(
     os.makedirs(os.path.dirname(aud_path), exist_ok=True)
     
     try:
+        print(f"\n[API] === New request from user_id={user_id} ===")
         if text:
-            # Use TTS service to synthesize audio from text
-            tts_payload = {
-                "text": text,
-                "source_aud": reference_aud_url or "",
-                "split_sentences": split_sentences,
-                "streaming": False,
-                "speed": speed
-            }
-            if clone:
-                tts_payload["clone"] = clone
+            # Determine TTS provider
+            provider = tts_preference or DEFAULT_TTS_PREFERENCE
+            print(f"[API] Text provided ({len(text)} chars), using TTS provider: {provider}")
             
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                tts_response = await client.post(
-                    "http://tts:8000/generate",
-                    json=tts_payload
-                )
-                if tts_response.status_code != 200:
-                    raise HTTPException(
-                        status_code=502, 
-                        detail=f"TTS service error: {tts_response.text}"
+            if provider == "elevenlabs":
+                # Use ElevenLabs API
+                await synthesize_elevenlabs(text, aud_path, voice_id)
+            else:
+                # Use Coqui TTS service
+                print("[API] Calling Coqui TTS service...")
+                tts_payload = {
+                    "text": text,
+                    "source_aud": reference_aud_url or "",
+                    "split_sentences": split_sentences,
+                    "streaming": False,
+                    "speed": speed
+                }
+                if clone:
+                    tts_payload["clone"] = clone
+                
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    tts_response = await client.post(
+                        "http://tts:8000/generate",
+                        json=tts_payload
                     )
-                # Save the synthesized audio
-                with open(aud_path, "wb") as f:
-                    f.write(tts_response.content)
+                    if tts_response.status_code != 200:
+                        print(f"[API] Coqui TTS error: {tts_response.status_code}")
+                        raise HTTPException(
+                            status_code=502, 
+                            detail=f"TTS service error: {tts_response.text}"
+                        )
+                    print(f"[API] Received {len(tts_response.content)} bytes from Coqui TTS")
+                    # Save the synthesized audio
+                    with open(aud_path, "wb") as f:
+                        f.write(tts_response.content)
         else:
             # Use uploaded audio file
+            print("[API] Using uploaded audio file")
             with open(aud_path, "wb") as f:
                 content = await audio.read()
                 f.write(content)
+            print(f"[API] Uploaded audio saved ({len(content)} bytes)")
             
-        print("Audio saved to", aud_path)
+        print(f"[API] Audio ready at {aud_path}")
         
         output_path = os.path.join(output_dir, f"{user_id}.mp4")
         
@@ -399,14 +436,17 @@ async def generate_video(
             output_path=output_path,
             crop=crop,
             cfg_scale=cfg_scale,
-            nfe=nfe,
-            output_size=size
+            nfe=nfe
         )
+        
+        print("[API] Generation complete!")
         
         # Clean up temp audio
         if os.path.exists(aud_path):
             os.unlink(aud_path)
         
+        print(f"[API] Returning video: {output_path}")
+        print(f"[API] === Request complete for user_id={user_id} ===\n")
         return FileResponse(
             output_path,
             media_type="video/mp4",
