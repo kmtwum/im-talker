@@ -39,6 +39,68 @@ app.add_middleware(
 )
 
 
+# ==== TTS Configuration ====
+def _read_secret(env_var: str, default: str = "") -> str:
+    """Read secret from file path specified in env var, or return default."""
+    path = os.environ.get(env_var)
+    if path and os.path.exists(path):
+        with open(path, "r") as f:
+            return f.read().strip()
+    return default
+
+
+ELEVENLABS_API_KEY = _read_secret("ELEVENLABS_API_KEY_FILE")
+ELEVENLABS_VOICE_ID = os.environ.get("VOICE_ID", "TX3LPaxmHKxFdv7VOQHJ")
+DEFAULT_TTS_PREFERENCE = os.environ.get("TTS_PREFERENCE", "elevenlabs")
+
+
+async def synthesize_elevenlabs(text: str, output_path: str, voice_id: Optional[str] = None) -> None:
+    """Synthesize speech using ElevenLabs API."""
+    print(f"[TTS] Starting ElevenLabs synthesis for {len(text)} chars...")
+    if not ELEVENLABS_API_KEY:
+        raise HTTPException(status_code=500, detail="ElevenLabs API key not configured")
+    
+    vid = voice_id or ELEVENLABS_VOICE_ID
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{vid}"
+    print(f"[TTS] Using voice ID: {vid}")
+    
+    headers = {
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+        "xi-api-key": ELEVENLABS_API_KEY
+    }
+    payload = {
+        "text": text,
+        "model_id": "eleven_flash_v2_5",
+        "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.75
+        }
+    }
+    
+    print("[TTS] Calling ElevenLabs API...")
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        response = await client.post(url, json=payload, headers=headers)
+        if response.status_code != 200:
+            print(f"[TTS] ElevenLabs API error: {response.status_code}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"ElevenLabs API error: {response.text}"
+            )
+        print(f"[TTS] Received {len(response.content)} bytes from ElevenLabs")
+        # ElevenLabs returns MP3, save and convert to WAV for consistency
+        mp3_path = output_path.replace(".wav", ".mp3")
+        with open(mp3_path, "wb") as f:
+            f.write(response.content)
+        print(f"[TTS] Converting MP3 to WAV...")
+        # Convert MP3 to WAV using ffmpeg
+        cmd = f"ffmpeg -i {mp3_path} -ar 16000 -ac 1 {output_path} -y -loglevel error"
+        subprocess.call(cmd, shell=True)
+        if os.path.exists(mp3_path):
+            os.remove(mp3_path)
+        print(f"[TTS] Audio saved to {output_path}")
+
+
 class InferenceConfig:
     """Configuration matching base_options.py defaults"""
     def __init__(self):
@@ -269,10 +331,12 @@ async def generate_video(
     cfg_scale: float = Form(3.0),
     nfe: int = Form(7),
     size: int = Form(512, ge=64, le=512, description="Output video size in pixels (1:1 ratio)"),
+    tts_preference: Optional[Literal["elevenlabs", "coqui"]] = Form(None, description="TTS provider: 'elevenlabs' or 'coqui'"),
     reference_aud_url: Optional[str] = Form(None),
     clone: Optional[str] = Form(None),
     split_sentences: bool = Form(False),
-    speed: float = Form(1.0)
+    speed: float = Form(1.0),
+    voice_id: Optional[str] = Form(None, description="ElevenLabs voice ID (uses default if not provided)")
 ):
     """Generate talking face video from audio or text using default avatar.
     
