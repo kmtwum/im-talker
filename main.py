@@ -18,6 +18,7 @@ from transformers import Wav2Vec2FeatureExtractor
 import face_alignment
 
 # ==== Latency Optimizations ====
+torch.set_float32_matmul_precision('high')  # Enable TensorFloat32 for better performance
 torch.backends.cudnn.enabled = True
 torch.backends.cudnn.benchmark = True
 if hasattr(torch.backends.cuda, 'enable_flash_sdp'):
@@ -162,6 +163,18 @@ class InferenceAgent:
         self.renderer.eval()
         self.generator.eval()
         
+        # Apply torch.compile for faster inference (PyTorch 2.0+)
+        if hasattr(torch, 'compile'):
+            print("Applying torch.compile to renderer (this may take a moment on first run)...")
+            try:
+                # Compile the hot path functions
+                self.renderer.adapt = torch.compile(self.renderer.adapt, mode='default')
+                self.renderer.latent_token_decoder = torch.compile(self.renderer.latent_token_decoder, mode='default')
+                self.renderer.decode = torch.compile(self.renderer.decode, mode='default')
+                print("torch.compile applied successfully")
+            except Exception as e:
+                print(f"torch.compile failed (will use eager mode): {e}")
+        
         # Pre-load face alignment and wav2vec (one-time)
         print("Loading face alignment...")
         fa_device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -294,6 +307,9 @@ class InferenceAgent:
         d_hat = []
         with autocast(device_type='cuda', dtype=torch.bfloat16):
             for t in range(T):
+                # Mark step boundary for CUDA graphs (required with torch.compile reduce-overhead)
+                if hasattr(torch.compiler, 'cudagraph_mark_step_begin'):
+                    torch.compiler.cudagraph_mark_step_begin()
                 ta_c = self.renderer.adapt(sample[:, t, ...], g_r)
                 m_c = self.renderer.latent_token_decoder(ta_c)
                 d_hat.append(self.renderer.decode(m_c, m_r, f_r))
