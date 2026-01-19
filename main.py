@@ -32,6 +32,27 @@ from generator.FM import FMGenerator
 from renderer.models import IMTRenderer
 print = partial(print, flush=True)
 
+# ==== fMP4 Streaming Codec Configuration ====
+# Video codec configuration
+# Using H.265 (HEVC) for better compression in real-time streaming
+# To switch to H.264 for broader browser compatibility, change to:
+#   VIDEO_CODEC = "libx264"
+#   VIDEO_CODEC_PARAMS = "-preset ultrafast -tune zerolatency"
+#   VIDEO_CODEC_STRING = "avc1.42E01E"  # For MediaSource mime type
+VIDEO_CODEC = "libx265"
+VIDEO_CODEC_PARAMS = "-preset ultrafast -tune zerolatency"
+VIDEO_CODEC_STRING = "hvc1.1.6.L93.B0"  # For MediaSource mime type
+
+# Audio codec configuration
+# Using Opus for better quality at low bitrates
+# To switch to AAC for broader browser compatibility, change to:
+#   AUDIO_CODEC = "aac"
+#   AUDIO_CODEC_PARAMS = "-b:a 128k"
+#   AUDIO_CODEC_STRING = "mp4a.40.2"  # For MediaSource mime type
+AUDIO_CODEC = "libopus"
+AUDIO_CODEC_PARAMS = "-b:a 64k"
+AUDIO_CODEC_STRING = "opus"  # For MediaSource mime type
+
 app = FastAPI(title="IMTalker API")
 
 app.add_middleware(
@@ -456,6 +477,92 @@ class InferenceAgent:
             if os.path.exists(temp_out_path):
                 os.remove(temp_out_path)
 
+    def _encode_to_fmp4_segment(self, vid_tensor: torch.Tensor, audio_path: str, 
+                                 is_first: bool = False) -> tuple:
+        """Encode video tensor to fMP4 segment for MediaSource streaming.
+        
+        Uses fragmented MP4 format with movflags for streaming compatibility.
+        
+        Args:
+            vid_tensor: Video frames tensor [T, C, H, W]
+            audio_path: Path to audio file for this segment
+            is_first: If True, also extract and return initialization segment
+            
+        Returns:
+            Tuple of (media_segment_bytes, init_segment_bytes or None)
+        """
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp_vid:
+            temp_vid_path = tmp_vid.name
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as tmp_out:
+            temp_out_path = tmp_out.name
+
+        try:
+            # Write video frames to temp file
+            vid = vid_tensor.permute(0, 2, 3, 1).detach().clamp(-1, 1).cpu()
+            vid = (vid * 255).type(torch.ByteTensor)
+            torchvision.io.write_video(temp_vid_path, vid, fps=self.opt.fps)
+
+            # Encode to fMP4 with proper flags for MediaSource
+            # -movflags frag_keyframe+empty_moov+default_base_moof enables:
+            #   - frag_keyframe: Fragment at each keyframe
+            #   - empty_moov: Put moov at start with no sample data (streaming)
+            #   - default_base_moof: Use moof as base for offsets (MSE compatibility)
+            cmd = [
+                'ffmpeg', '-i', temp_vid_path, '-i', audio_path,
+                '-c:v', VIDEO_CODEC] + VIDEO_CODEC_PARAMS.split() + [
+                '-c:a', AUDIO_CODEC] + AUDIO_CODEC_PARAMS.split() + [
+                '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+                '-f', 'mp4',
+                temp_out_path,
+                '-y', '-loglevel', 'error'
+            ]
+            subprocess.call(cmd)
+
+            # Read the fMP4 bytes
+            with open(temp_out_path, 'rb') as f:
+                fmp4_bytes = f.read()
+
+            if is_first:
+                # Extract initialization segment (everything before first 'moof')
+                init_segment = self._extract_init_segment(fmp4_bytes)
+                # Media segment is everything from first 'moof' onwards
+                moof_pos = fmp4_bytes.find(b'moof')
+                if moof_pos > 4:
+                    media_segment = fmp4_bytes[moof_pos - 4:]  # Include box size
+                else:
+                    media_segment = fmp4_bytes
+                return (media_segment, init_segment)
+            else:
+                return (fmp4_bytes, None)
+
+        finally:
+            # Cleanup temp files
+            if os.path.exists(temp_vid_path):
+                os.remove(temp_vid_path)
+            if os.path.exists(temp_out_path):
+                os.remove(temp_out_path)
+
+    def _extract_init_segment(self, fmp4_bytes: bytes) -> bytes:
+        """Extract initialization segment from fMP4 data.
+        
+        The init segment contains ftyp + moov boxes with codec metadata
+        needed by MediaSource before any media segments can be appended.
+        
+        Args:
+            fmp4_bytes: Complete fMP4 file bytes
+            
+        Returns:
+            Initialization segment bytes (ftyp + moov)
+        """
+        # Find 'moof' marker - init segment is everything before it
+        moof_pos = fmp4_bytes.find(b'moof')
+        if moof_pos == -1:
+            raise ValueError("No moof box found - not a valid fMP4")
+        
+        # Init segment ends 4 bytes before 'moof' (the box size field)
+        init_end = moof_pos - 4
+        return fmp4_bytes[:init_end]
+
 
 def split_audio_into_chunks(audio_path: str, chunk_duration: float, output_dir: str) -> List[str]:
     """Split audio file into chunks of specified duration using ffmpeg.
@@ -627,3 +734,184 @@ async def generate_video(
 @app.get("/health")
 async def health_check():
     return {"status": "healthy", "models_loaded": agent is not None}
+
+
+@app.post("/generate/stream")
+async def generate_video_stream(
+    audio: Optional[UploadFile] = File(None),
+    text: Optional[str] = Form(None),
+    user_id: str = Form(...),
+    avatar: str = Form(...),
+    cfg_scale: float = Form(1.0),
+    nfe: int = Form(7),
+    chunk_duration: float = Form(5.0, ge=2.0, le=15.0, description="Duration of each video chunk in seconds"),
+    tts_preference: Optional[Literal["elevenlabs", "coqui"]] = Form(None),
+    voice_id: Optional[str] = Form(None),
+    reference_aud_url: Optional[str] = Form(None),
+    clone: Optional[str] = Form(None),
+    split_sentences: bool = Form(False),
+    speed: float = Form(1.0)
+):
+    """Stream video as fMP4 chunks for MediaSource Extensions playback.
+    
+    This endpoint streams fragmented MP4 segments compatible with the browser's
+    MediaSource Extensions API. The first bytes are the initialization segment
+    containing codec metadata, followed by media segments.
+    
+    Client should use:
+    - MediaSource.isTypeSupported('video/mp4; codecs="hvc1.1.6.L93.B0, opus"')
+    - Append init segment first, then media segments to SourceBuffer
+    
+    Provide either 'audio' (uploaded file) or 'text' (for TTS synthesis).
+    """
+    
+    if not audio and not text:
+        raise HTTPException(status_code=400, detail="Either 'audio' or 'text' must be provided")
+
+    # Validate avatar exists
+    if avatar not in agent.avatars:
+        raise HTTPException(status_code=400, detail=f"Avatar '{avatar}' not found. Available: {agent.avatars}")
+    
+    aud_path = f"/app/aud/{user_id}_stream_audio.wav"
+    chunk_dir = f"/app/aud/{user_id}_chunks/"
+    os.makedirs(os.path.dirname(aud_path), exist_ok=True)
+    
+    # Get full audio first (from upload or TTS)
+    try:
+        print(f"\n[Stream] === New streaming request from user_id={user_id} ===")
+        if text:
+            provider = tts_preference or DEFAULT_TTS_PREFERENCE
+            print(f"[Stream] Text provided ({len(text)} chars), using TTS: {provider}")
+            
+            if provider == "elevenlabs":
+                await synthesize_elevenlabs(text, aud_path, voice_id)
+            else:
+                print("[Stream] Calling Coqui TTS service...")
+                tts_payload = {
+                    "text": text,
+                    "source_aud": reference_aud_url or "",
+                    "split_sentences": split_sentences,
+                    "streaming": False,
+                    "speed": speed
+                }
+                if clone:
+                    tts_payload["clone"] = clone
+                
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    tts_response = await client.post(
+                        "http://tts:8000/generate",
+                        json=tts_payload
+                    )
+                    if tts_response.status_code != 200:
+                        raise HTTPException(status_code=502, detail=f"TTS error: {tts_response.text}")
+                    with open(aud_path, "wb") as f:
+                        f.write(tts_response.content)
+        else:
+            print("[Stream] Using uploaded audio file")
+            with open(aud_path, "wb") as f:
+                content = await audio.read()
+                f.write(content)
+    except httpx.RequestError as e:
+        if os.path.exists(aud_path):
+            os.unlink(aud_path)
+        raise HTTPException(status_code=502, detail=f"TTS connection failed: {str(e)}")
+    
+    async def fmp4_chunk_generator() -> AsyncGenerator[bytes, None]:
+        """Generate and yield fMP4 segments for MediaSource streaming."""
+        chunk_paths = []
+        try:
+            # Get pre-loaded avatar tensor
+            s_tensor = agent.avatar_pils[avatar]
+            
+            # Pre-compute renderer encodings (reused for all chunks)
+            print("[Stream] Pre-computing renderer encodings...")
+            with torch.no_grad():
+                f_r, g_r = agent.renderer.dense_feature_encoder(s_tensor)
+                t_lat = agent.renderer.latent_token_encoder(s_tensor)
+                if isinstance(t_lat, tuple):
+                    t_lat = t_lat[0]
+            
+            # Split audio into chunks
+            print(f"[Stream] Splitting audio into {chunk_duration}s chunks...")
+            chunk_paths = split_audio_into_chunks(aud_path, chunk_duration, chunk_dir)
+            
+            if not chunk_paths:
+                raise ValueError("No audio chunks generated")
+            
+            print(f"[Stream] Processing {len(chunk_paths)} chunks...")
+            
+            # Generate video for each audio chunk
+            for i, chunk_path in enumerate(chunk_paths):
+                is_first = (i == 0)
+                print(f"[Stream] Generating chunk {i+1}/{len(chunk_paths)}...")
+                
+                # Process audio for this chunk
+                a_tensor = agent.process_audio(chunk_path)
+                
+                # Generate motion latents
+                data = {
+                    's': s_tensor,
+                    'a': a_tensor,
+                    'pose': None,
+                    'cam': None,
+                    'gaze': None,
+                    'ref_x': t_lat
+                }
+                sample = agent.generator.sample(data, a_cfg_scale=cfg_scale, nfe=nfe, seed=agent.opt.seed)
+                
+                # Render frames
+                T = sample.shape[1]
+                ta_r = agent.renderer.adapt(t_lat, g_r)
+                m_r = agent.renderer.latent_token_decoder(ta_r)
+                
+                d_hat = []
+                with autocast(device_type='cuda', dtype=torch.bfloat16):
+                    for t in range(T):
+                        if hasattr(torch.compiler, 'cudagraph_mark_step_begin'):
+                            torch.compiler.cudagraph_mark_step_begin()
+                        ta_c = agent.renderer.adapt(sample[:, t, ...], g_r)
+                        m_c = agent.renderer.latent_token_decoder(ta_c)
+                        frame = agent.renderer.decode(m_c, m_r, f_r)
+                        d_hat.append(frame.float().cpu())
+                
+                vid_tensor = torch.stack(d_hat, dim=1).squeeze()
+                
+                # Encode to fMP4 segment
+                media_bytes, init_bytes = agent._encode_to_fmp4_segment(
+                    vid_tensor, chunk_path, is_first=is_first
+                )
+                
+                # Yield init segment first (only for first chunk)
+                if is_first and init_bytes:
+                    print(f"[Stream] Sending init segment ({len(init_bytes)} bytes)")
+                    yield init_bytes
+                
+                # Yield media segment
+                print(f"[Stream] Sending media segment {i+1} ({len(media_bytes)} bytes)")
+                yield media_bytes
+                
+            print("[Stream] All chunks sent!")
+                
+        except Exception as e:
+            print(f"[Stream] Error: {e}")
+            raise
+        finally:
+            # Cleanup
+            cleanup_chunks(chunk_paths, chunk_dir)
+            if os.path.exists(aud_path):
+                os.unlink(aud_path)
+            print(f"[Stream] === Stream complete for user_id={user_id} ===\n")
+    
+    # Return codec info in headers for client setup
+    codec_string = f'video/mp4; codecs="{VIDEO_CODEC_STRING}, {AUDIO_CODEC_STRING}"'
+    
+    return StreamingResponse(
+        fmp4_chunk_generator(),
+        media_type="video/mp4",
+        headers={
+            "X-Codec-String": codec_string,
+            "X-Chunk-Duration": str(chunk_duration),
+            "Cache-Control": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+        }
+    )
