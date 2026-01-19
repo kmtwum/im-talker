@@ -845,41 +845,55 @@ async def generate_video_stream(
                 is_first = (i == 0)
                 print(f"[Stream] Generating chunk {i+1}/{len(chunk_paths)}...")
                 
-                # Process audio for this chunk
-                a_tensor = agent.process_audio(chunk_path)
+                # Wrap entire chunk generation in no_grad to prevent OOM
+                with torch.no_grad():
+                    # Process audio for this chunk
+                    a_tensor = agent.process_audio(chunk_path)
+                    
+                    # Generate motion latents
+                    data = {
+                        's': s_tensor,
+                        'a': a_tensor,
+                        'pose': None,
+                        'cam': None,
+                        'gaze': None,
+                        'ref_x': t_lat
+                    }
+                    sample = agent.generator.sample(data, a_cfg_scale=cfg_scale, nfe=nfe, seed=agent.opt.seed)
+                    
+                    # Free audio tensor immediately
+                    del a_tensor
+                    
+                    # Render frames
+                    T = sample.shape[1]
+                    ta_r = agent.renderer.adapt(t_lat, g_r)
+                    m_r = agent.renderer.latent_token_decoder(ta_r)
+                    
+                    d_hat = []
+                    with autocast(device_type='cuda', dtype=torch.bfloat16):
+                        for t in range(T):
+                            if hasattr(torch.compiler, 'cudagraph_mark_step_begin'):
+                                torch.compiler.cudagraph_mark_step_begin()
+                            ta_c = agent.renderer.adapt(sample[:, t, ...], g_r)
+                            m_c = agent.renderer.latent_token_decoder(ta_c)
+                            frame = agent.renderer.decode(m_c, m_r, f_r)
+                            d_hat.append(frame.float().cpu())
+                    
+                    # Free sample tensor
+                    del sample
+                    
+                    vid_tensor = torch.stack(d_hat, dim=1).squeeze()
+                    del d_hat
                 
-                # Generate motion latents
-                data = {
-                    's': s_tensor,
-                    'a': a_tensor,
-                    'pose': None,
-                    'cam': None,
-                    'gaze': None,
-                    'ref_x': t_lat
-                }
-                sample = agent.generator.sample(data, a_cfg_scale=cfg_scale, nfe=nfe, seed=agent.opt.seed)
-                
-                # Render frames
-                T = sample.shape[1]
-                ta_r = agent.renderer.adapt(t_lat, g_r)
-                m_r = agent.renderer.latent_token_decoder(ta_r)
-                
-                d_hat = []
-                with autocast(device_type='cuda', dtype=torch.bfloat16):
-                    for t in range(T):
-                        if hasattr(torch.compiler, 'cudagraph_mark_step_begin'):
-                            torch.compiler.cudagraph_mark_step_begin()
-                        ta_c = agent.renderer.adapt(sample[:, t, ...], g_r)
-                        m_c = agent.renderer.latent_token_decoder(ta_c)
-                        frame = agent.renderer.decode(m_c, m_r, f_r)
-                        d_hat.append(frame.float().cpu())
-                
-                vid_tensor = torch.stack(d_hat, dim=1).squeeze()
-                
-                # Encode to fMP4 segment
+                # Encode to fMP4 segment (vid_tensor is on CPU, safe outside no_grad)
                 media_bytes, init_bytes = agent._encode_to_fmp4_segment(
                     vid_tensor, chunk_path, is_first=is_first
                 )
+                
+                # Free vid_tensor and clear GPU cache
+                del vid_tensor
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 
                 # Yield init segment first (only for first chunk)
                 if is_first and init_bytes:
