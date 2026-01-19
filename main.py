@@ -369,6 +369,7 @@ async def generate_video(
     audio: Optional[UploadFile] = File(None),
     text: Optional[str] = Form(None),
     user_id: str = Form(...),
+    avatar: str = Form(...),
     crop: bool = Form(True),
     cfg_scale: float = Form(1.0),
     nfe: int = Form(7),
@@ -390,7 +391,10 @@ async def generate_video(
     if not audio and not text:
         raise HTTPException(status_code=400, detail="Either 'audio' or 'text' must be provided")
     
-    img_path = "/app/img/avatar_chest.jpg"
+    img_path = f"/app/user_img/{avatar}.jpg"
+    if not os.path.exists(img_path):
+        img_path = "/app/img/avatar_chest.jpg"
+
     output_dir = f"/app/results/{user_id}/"
     os.makedirs(output_dir, exist_ok=True)
     
