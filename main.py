@@ -325,17 +325,22 @@ class InferenceAgent:
                     torch.compiler.cudagraph_mark_step_begin()
                 ta_c = self.renderer.adapt(sample[:, t, ...], g_r)
                 m_c = self.renderer.latent_token_decoder(ta_c)
-                d_hat.append(self.renderer.decode(m_c, m_r, f_r))
+                frame = self.renderer.decode(m_c, m_r, f_r)
+                # d_hat.append(frame) #GPU
+
+                # Move to CPU immediately to avoid GPU OOM for long videos
+                d_hat.append(frame.float().cpu())
                 if (t + 1) % 25 == 0 or t == T - 1:
                     print(f"[Generate] Rendered frame {t + 1}/{T}")
         
+        # Stack on CPU (already there)
         vid_tensor = torch.stack(d_hat, dim=1).squeeze()
         print(f"[Generate] All frames rendered, tensor shape: {vid_tensor.shape}")
         
-        # Ensure CUDA operations complete before video save
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        
+        # No need to synchronize - frames already moved to CPU
+        # if torch.cuda.is_available():
+        #     torch.cuda.synchronize()
+
         # Save video (resize on GPU if needed)
         print("[Generate] Step 6/6: Saving video...")
         return self._save_video(vid_tensor, output_path, aud_path)
