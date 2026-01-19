@@ -124,6 +124,45 @@ async def synthesize_elevenlabs(text: str, output_path: str, voice_id: Optional[
         print(f"[TTS] Audio saved to {output_path}")
 
 
+async def synthesize_coqui(
+    text: str,
+    output_path: str,
+    reference_aud_url: Optional[str] = None,
+    clone: Optional[str] = None,
+    split_sentences: bool = False,
+    speed: float = 1.0
+) -> None:
+    """Synthesize speech using Coqui TTS service."""
+    print(f"[TTS] Starting Coqui synthesis for {len(text)} chars...")
+    
+    tts_payload = {
+        "text": text,
+        "source_aud": reference_aud_url or "",
+        "split_sentences": split_sentences,
+        "streaming": False,
+        "speed": speed
+    }
+    if clone:
+        tts_payload["clone"] = clone
+    
+    print("[TTS] Calling Coqui TTS service...")
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            "http://tts:8000/generate",
+            json=tts_payload
+        )
+        if response.status_code != 200:
+            print(f"[TTS] Coqui TTS error: {response.status_code}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"TTS service error: {response.text}"
+            )
+        print(f"[TTS] Received {len(response.content)} bytes from Coqui TTS")
+        with open(output_path, "wb") as f:
+            f.write(response.content)
+        print(f"[TTS] Audio saved to {output_path}")
+
+
 class InferenceConfig:
     """Configuration matching base_options.py defaults"""
     def __init__(self):
@@ -660,32 +699,13 @@ async def generate_video(
                 await synthesize_elevenlabs(text, aud_path, voice_id)
             else:
                 # Use Coqui TTS service
-                print("[API] Calling Coqui TTS service...")
-                tts_payload = {
-                    "text": text,
-                    "source_aud": reference_aud_url or "",
-                    "split_sentences": split_sentences,
-                    "streaming": False,
-                    "speed": speed
-                }
-                if clone:
-                    tts_payload["clone"] = clone
-
-                async with httpx.AsyncClient(timeout=60.0) as client:
-                    tts_response = await client.post(
-                        "http://tts:8000/generate",
-                        json=tts_payload
-                    )
-                    if tts_response.status_code != 200:
-                        print(f"[API] Coqui TTS error: {tts_response.status_code}")
-                        raise HTTPException(
-                            status_code=502,
-                            detail=f"TTS service error: {tts_response.text}"
-                        )
-                    print(f"[API] Received {len(tts_response.content)} bytes from Coqui TTS")
-                    # Save the synthesized audio
-                    with open(aud_path, "wb") as f:
-                        f.write(tts_response.content)
+                await synthesize_coqui(
+                    text, aud_path,
+                    reference_aud_url=reference_aud_url,
+                    clone=clone,
+                    split_sentences=split_sentences,
+                    speed=speed
+                )
         else:
             # Use uploaded audio file
             print("[API] Using uploaded audio file")
@@ -804,26 +824,13 @@ async def generate_video_stream(
             if provider == "elevenlabs":
                 await synthesize_elevenlabs(text, aud_path, voice_id)
             else:
-                print("[Stream] Calling Coqui TTS service...")
-                tts_payload = {
-                    "text": text,
-                    "source_aud": reference_aud_url or "",
-                    "split_sentences": split_sentences,
-                    "streaming": False,
-                    "speed": speed
-                }
-                if clone:
-                    tts_payload["clone"] = clone
-                
-                async with httpx.AsyncClient(timeout=60.0) as client:
-                    tts_response = await client.post(
-                        "http://tts:8000/generate",
-                        json=tts_payload
-                    )
-                    if tts_response.status_code != 200:
-                        raise HTTPException(status_code=502, detail=f"TTS error: {tts_response.text}")
-                    with open(aud_path, "wb") as f:
-                        f.write(tts_response.content)
+                await synthesize_coqui(
+                    text, aud_path,
+                    reference_aud_url=reference_aud_url,
+                    clone=clone,
+                    split_sentences=split_sentences,
+                    speed=speed
+                )
         else:
             print("[Stream] Using uploaded audio file")
             with open(aud_path, "wb") as f:
