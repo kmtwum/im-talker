@@ -114,7 +114,7 @@ class InferenceConfig:
         self.fix_noise_seed = False
         self.input_size = 512
         self.input_nc = 3
-        self.fps = 25.0
+        self.fps = 15.0
         self.sampling_rate = 16000
         self.audio_marcing = 2
         self.wav2vec_sec = 2.0
