@@ -1,3 +1,4 @@
+import glob
 import os
 import tempfile
 import subprocess
@@ -164,7 +165,13 @@ class InferenceAgent:
         
         self.renderer.eval()
         self.generator.eval()
-        
+
+        self.transform = transforms.Compose([
+            transforms.Resize((512, 512)),
+            transforms.ToTensor(),
+        ])
+        self._load_avatars()
+
         # Apply torch.compile for faster inference (PyTorch 2.0+)
         if hasattr(torch, 'compile'):
             print("Applying torch.compile to renderer (this may take a moment on first run)...")
@@ -191,11 +198,6 @@ class InferenceAgent:
             opt.wav2vec_model_path, local_files_only=True
         )
         
-        self.transform = transforms.Compose([
-            transforms.Resize((512, 512)),
-            transforms.ToTensor(),
-        ])
-        
         print(f"Inference agent ready! {opt.device}")
     
     def _load_renderer(self, path):
@@ -215,6 +217,16 @@ class InferenceAgent:
             for name, param in self.generator.named_parameters():
                 if name in clean_dict:
                     param.copy_(clean_dict[name])  # Already on correct device
+
+    def _load_avatars(self):
+        self.avatars = ['sunny', 'jamal']
+        self.avatar_pils = {}
+
+        for avatar in self.avatars:
+            img = cv2.imread(f"/app/user_img/{avatar}.jpg")
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img_pil = Image.fromarray(img)
+            self.avatar_pils[avatar] = self.transform(img_pil).unsqueeze(0).to(self.device, non_blocking=True)
     
     def process_image(self, img_path: str, crop: bool = True) -> torch.Tensor:
         """Load and preprocess source image"""
@@ -267,13 +279,12 @@ class InferenceAgent:
         return result
     
     @torch.no_grad()
-    def generate(self, img_path: str, aud_path: str, output_path: str, 
-                 crop: bool = True, cfg_scale: float = 3.0, nfe: int = 7) -> str:
+    def generate(self, avatar: str, aud_path: str, output_path: str, cfg_scale: float = 3.0, nfe: int = 7) -> str:
         print(f"\n[Generate] Starting generation (cfg_scale={cfg_scale}, nfe={nfe})")
         
         # Preprocess inputs
         print("[Generate] Step 1/6: Processing image...")
-        s_tensor = self.process_image(img_path, crop)
+        s_tensor = self.avatar_pils[avatar]
         print("[Generate] Step 2/6: Processing audio...")
         a_tensor = self.process_audio(aud_path)
         
@@ -453,10 +464,9 @@ async def generate_video(
         
         # Direct inference - no subprocess!
         agent.generate(
-            img_path=img_path,
+            avatar=avatar,
             aud_path=aud_path,
             output_path=output_path,
-            crop=crop,
             cfg_scale=cfg_scale,
             nfe=nfe
         )
