@@ -715,19 +715,34 @@ async def generate_video(
         
         print(f"[API] Returning video: {output_path}")
         print(f"[API] === Request complete for user_id={user_id} ===\n")
+        
+        # Cleanup after response is sent
+        def cleanup_output_dir():
+            if os.path.exists(output_dir):
+                shutil.rmtree(output_dir, ignore_errors=True)
+                print(f"[API] Cleaned up {output_dir}")
+        
+        background_tasks = BackgroundTasks()
+        background_tasks.add_task(cleanup_output_dir)
+        
         return FileResponse(
             output_path,
             media_type="video/mp4",
-            filename=f"generated_{user_id}.mp4"
+            filename=f"generated_{user_id}.mp4",
+            background=background_tasks
         )
         
     except httpx.RequestError as e:
         if os.path.exists(aud_path):
             os.unlink(aud_path)
+        if os.path.exists(output_dir):
+            shutil.rmtree(output_dir, ignore_errors=True)
         raise HTTPException(status_code=502, detail=f"Failed to connect to TTS service: {str(e)}")
     except Exception as e:
         if os.path.exists(aud_path):
             os.unlink(aud_path)
+        if os.path.exists(output_dir):
+            shutil.rmtree(output_dir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
