@@ -2,9 +2,11 @@ import glob
 import os
 import tempfile
 import subprocess
+import uuid
 from typing import Optional, Literal, List, AsyncGenerator
 from functools import partial
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException
+import shutil
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
@@ -638,10 +640,12 @@ async def generate_video(
     if not os.path.exists(img_path):
         img_path = "/app/img/avatar_chest.jpg"
 
-    output_dir = f"/app/results/{user_id}/"
+    request_id = str(uuid.uuid4())[:8]
+    
+    output_dir = f"/app/results/{user_id}/{request_id}/"
     os.makedirs(output_dir, exist_ok=True)
     
-    aud_path = f"/app/aud/{user_id}_audio.wav"
+    aud_path = f"/app/aud/{user_id}_{request_id}_audio.wav"
     os.makedirs(os.path.dirname(aud_path), exist_ok=True)
     
     try:
@@ -768,8 +772,11 @@ async def generate_video_stream(
     if avatar not in agent.avatars:
         raise HTTPException(status_code=400, detail=f"Avatar '{avatar}' not found. Available: {agent.avatars}")
     
-    aud_path = f"/app/aud/{user_id}_stream_audio.wav"
-    chunk_dir = f"/app/aud/{user_id}_chunks/"
+    # Generate unique request ID to avoid conflicts from parallel requests
+    request_id = str(uuid.uuid4())[:8]
+    
+    aud_path = f"/app/aud/{user_id}_{request_id}_stream_audio.wav"
+    chunk_dir = f"/app/aud/{user_id}_{request_id}_chunks/"
     os.makedirs(os.path.dirname(aud_path), exist_ok=True)
     
     # Get full audio first (from upload or TTS)
