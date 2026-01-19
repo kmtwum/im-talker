@@ -132,14 +132,14 @@ class InferenceConfig:
         self.num_heads = 8
         self.mlp_ratio = 4.0
         self.no_learned_pe = False
-        self.num_prev_frames = 5  # Reduced from 10 for faster processing
+        self.num_prev_frames = 2  # Reduced from 10 for faster processing
         # Optimized defaults
-        self.ode_atol = 1e-5
-        self.ode_rtol = 1e-5
+        self.ode_atol = 1e-6
+        self.ode_rtol = 1e-6
         self.nfe = 7
         self.torchdiffeq_ode_method = 'euler'
         # CFG scale: 1.0 = no CFG (fastest), >1.0 = 2x ODE computation per step
-        self.a_cfg_scale = 1.5  # Reduced from 3.0 - higher values double computation
+        self.a_cfg_scale = 1.0  # Minimal movement for subtle lip-sync focused output
         self.swin_res_threshold = 128
         self.window_size = 8
         # Paths
@@ -370,7 +370,7 @@ async def generate_video(
     text: Optional[str] = Form(None),
     user_id: str = Form(...),
     crop: bool = Form(True),
-    cfg_scale: float = Form(3.0),
+    cfg_scale: float = Form(1.0),
     nfe: int = Form(7),
     tts_preference: Optional[Literal["elevenlabs", "coqui"]] = Form(None, description="TTS provider: 'elevenlabs' or 'coqui'"),
     reference_aud_url: Optional[str] = Form(None),
