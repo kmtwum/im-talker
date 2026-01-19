@@ -2,6 +2,7 @@ import os
 import tempfile
 import subprocess
 from typing import Optional, Literal
+from functools import partial
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +29,7 @@ if hasattr(torch.backends.cuda, 'enable_mem_efficient_sdp'):
 
 from generator.FM import FMGenerator
 from renderer.models import IMTRenderer
+print = partial(print, flush=True)
 
 app = FastAPI(title="IMTalker API")
 
@@ -294,7 +296,7 @@ class InferenceAgent:
         }
         
         # Generate motion latents
-        print("[Generate] Step 4/6: Generating motion latents...")
+        print(f"[Generate] Step 4/6: Generating motion latents cfg_scale: {cfg_scale}, nfe: {nfe}...")
         sample = self.generator.sample(data, a_cfg_scale=cfg_scale, nfe=nfe, seed=self.opt.seed)
         print(f"[Generate] Generated {sample.shape[1]} motion frames")
         
