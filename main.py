@@ -33,25 +33,21 @@ from renderer.models import IMTRenderer
 print = partial(print, flush=True)
 
 # ==== fMP4 Streaming Codec Configuration ====
-# Video codec configuration
-# Using H.265 (HEVC) for better compression in real-time streaming
-# To switch to H.264 for broader browser compatibility, change to:
-#   VIDEO_CODEC = "libx264"
-#   VIDEO_CODEC_PARAMS = "-preset ultrafast -tune zerolatency"
-#   VIDEO_CODEC_STRING = "avc1.42E01E"  # For MediaSource mime type
-VIDEO_CODEC = "libx265"
-VIDEO_CODEC_PARAMS = "-preset ultrafast -tune zerolatency"
-VIDEO_CODEC_STRING = "hvc1.1.6.L93.B0"  # For MediaSource mime type
+# Using H.265 (HEVC) + Opus for better compression in real-time streaming
+# VIDEO_CODEC = "libx265"
+# VIDEO_CODEC_PARAMS = "-preset ultrafast -tune zerolatency"
+# VIDEO_CODEC_STRING = "hvc1.1.6.L93.B0"  # For MediaSource mime type
+# AUDIO_CODEC = "libopus"
+# AUDIO_CODEC_PARAMS = "-b:a 64k"
+# AUDIO_CODEC_STRING = "opus"  # For MediaSource mime type
 
-# Audio codec configuration
-# Using Opus for better quality at low bitrates
-# To switch to AAC for broader browser compatibility, change to:
-#   AUDIO_CODEC = "aac"
-#   AUDIO_CODEC_PARAMS = "-b:a 128k"
-#   AUDIO_CODEC_STRING = "mp4a.40.2"  # For MediaSource mime type
-AUDIO_CODEC = "libopus"
-AUDIO_CODEC_PARAMS = "-b:a 64k"
-AUDIO_CODEC_STRING = "opus"  # For MediaSource mime type
+# Using H.264 + AAC for broader browser compatibility
+VIDEO_CODEC = "libx264"
+VIDEO_CODEC_PARAMS = "-preset ultrafast -tune zerolatency"
+VIDEO_CODEC_STRING = "avc1.42E01E"  # For MediaSource mime type
+AUDIO_CODEC = "aac"
+AUDIO_CODEC_PARAMS = "-b:a 128k"
+AUDIO_CODEC_STRING = "mp4a.40.2"  # For MediaSource mime type
 
 app = FastAPI(title="IMTalker API")
 
