@@ -392,7 +392,7 @@ class InferenceAgent:
                     print(f"[Generate] Rendered frame {t + 1}/{T}")
         
         # Stack on CPU (already there)
-        vid_tensor = torch.stack(d_hat, dim=1).squeeze()
+        vid_tensor = torch.stack(d_hat, dim=1).squeeze(0)  # Remove batch dim only, keep time dim
         print(f"[Generate] All frames rendered, tensor shape: {vid_tensor.shape}")
 
         # No need to synchronize - frames already moved to CPU
@@ -475,7 +475,7 @@ class InferenceAgent:
                 m_c = self.renderer.latent_token_decoder(ta_c)
                 d_hat.append(self.renderer.decode(m_c, m_r, f_r))
 
-        vid_tensor = torch.stack(d_hat, dim=1).squeeze()
+        vid_tensor = torch.stack(d_hat, dim=1).squeeze(0)  # Remove batch dim only, keep time dim
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -907,7 +907,7 @@ async def generate_video_stream(
                     # Free sample tensor
                     del sample
                     
-                    vid_tensor = torch.stack(d_hat, dim=1).squeeze()
+                    vid_tensor = torch.stack(d_hat, dim=1).squeeze(0)  # Remove batch dim only, keep time dim
                     del d_hat
                 
                 # Encode to fMP4 segment (vid_tensor is on CPU, safe outside no_grad)
