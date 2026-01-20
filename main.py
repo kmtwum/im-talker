@@ -559,18 +559,23 @@ class InferenceAgent:
             with open(temp_out_path, 'rb') as f:
                 fmp4_bytes = f.read()
 
+            # Always separate Media Segment from Init Segment
+            # Media segment is everything from first 'moof' onwards
+            moof_pos = fmp4_bytes.find(b'moof')
+            if moof_pos > 4:
+                media_segment = fmp4_bytes[moof_pos - 4:]  # Include box size
+            else:
+                # Should not happen with frag_keyframe+empty_moov
+                media_segment = fmp4_bytes
+
             if is_first:
                 # Extract initialization segment (everything before first 'moof')
                 init_segment = self._extract_init_segment(fmp4_bytes)
-                # Media segment is everything from first 'moof' onwards
-                moof_pos = fmp4_bytes.find(b'moof')
-                if moof_pos > 4:
-                    media_segment = fmp4_bytes[moof_pos - 4:]  # Include box size
-                else:
-                    media_segment = fmp4_bytes
                 return (media_segment, init_segment)
             else:
-                return (fmp4_bytes, None)
+                # For subsequent chunks, ONLY return the media segment
+                # (ffmpeg always generates a full file with headers, we must strip them)
+                return (media_segment, None)
 
         finally:
             # Cleanup temp files
