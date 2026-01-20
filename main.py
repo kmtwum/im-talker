@@ -544,11 +544,13 @@ class InferenceAgent:
             #   - frag_keyframe: Fragment at each keyframe
             #   - empty_moov: Put moov at start with no sample data (streaming)
             #   - default_base_moof: Use moof as base for offsets (MSE compatibility)
+            # -force_key_frames ensures IDR frames at fragment boundaries
             cmd = [
                 'ffmpeg', '-i', temp_vid_path, '-i', audio_path,
                 '-c:v', VIDEO_CODEC] + VIDEO_CODEC_PARAMS.split() + [
                 '-c:a', AUDIO_CODEC] + AUDIO_CODEC_PARAMS.split() + [
                 '-movflags', 'frag_keyframe+empty_moov+default_base_moof',
+                '-force_key_frames', 'expr:gte(t,n_forced*1)',  # Force keyframe every second
                 '-f', 'mp4',
                 temp_out_path,
                 '-y', '-loglevel', 'error'
