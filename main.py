@@ -587,7 +587,7 @@ class InferenceAgent:
                 os.remove(temp_out_path)
 
     def _extract_init_segment(self, fmp4_bytes: bytes) -> bytes:
-        """Extract initialization segment from fMP4 data.
+        """Extract initialization segment from fMP4 data using proper MP4 box parsing.
         
         The init segment contains ftyp + moov boxes with codec metadata
         needed by MediaSource before any media segments can be appended.
@@ -598,13 +598,37 @@ class InferenceAgent:
         Returns:
             Initialization segment bytes (ftyp + moov)
         """
-        # Find 'moof' marker - init segment is everything before it
-        moof_pos = fmp4_bytes.find(b'moof')
-        if moof_pos == -1:
-            raise ValueError("No moof box found - not a valid fMP4")
+        offset = 0
+        init_end = 0
         
-        # Init segment ends 4 bytes before 'moof' (the box size field)
-        init_end = moof_pos - 4
+        while offset < len(fmp4_bytes):
+            if offset + 8 > len(fmp4_bytes):
+                break
+                
+            # Read box header
+            size = int.from_bytes(fmp4_bytes[offset:offset+4], 'big')
+            box_type = fmp4_bytes[offset+4:offset+8].decode('ascii', errors='ignore')
+            
+            # Handle extended size
+            if size == 1:
+                if offset + 16 > len(fmp4_bytes):
+                    break
+                size = int.from_bytes(fmp4_bytes[offset+8:offset+16], 'big')
+            elif size == 0:
+                size = len(fmp4_bytes) - offset
+
+            # Track end of init segment (ftyp + moov)
+            if box_type in ['ftyp', 'moov']:
+                init_end = offset + size
+            elif box_type == 'moof':
+                # Found first media fragment, init segment ends here
+                break
+                
+            offset += size
+        
+        if init_end == 0:
+            raise ValueError("No valid init segment found (missing ftyp/moov)")
+            
         return fmp4_bytes[:init_end]
 
 
